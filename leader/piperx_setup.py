@@ -92,7 +92,11 @@ def enter_can_ctrl(robot):
 
 
 def run_leader(robot, gripper, sock, target, rate):
+    # Status is printed once per second, NOT per sample: blocking on a slow
+    # terminal/ssh stdout at 100Hz stalls the control loop and builds lag.
     period = 1.0 / rate
+    sent = 0
+    last_report = time.monotonic()
     while True:
         ja = robot.get_joint_angles()
         if ja is not None:
@@ -101,25 +105,46 @@ def run_leader(robot, gripper, sock, target, rate):
             if gs is not None and gs.msg.mode == "width":
                 msg["gripper"] = gs.msg.value  # meters
             sock.sendto(json.dumps(msg).encode(), target)
-            print(f"tx joints: {[round(j, 4) for j in msg['joints']]}"
-                  f" gripper: {msg.get('gripper')} (feedback {ja.hz:.0f}Hz)", flush=True)
+            sent += 1
+        now = time.monotonic()
+        if now - last_report >= 1.0:
+            if ja is not None:
+                print(f"tx {sent / (now - last_report):.0f}Hz"
+                      f" joints: {[round(j, 4) for j in msg['joints']]}"
+                      f" gripper: {msg.get('gripper')} (feedback {ja.hz:.0f}Hz)", flush=True)
+            else:
+                print("tx 0Hz (no arm feedback)", flush=True)
+            sent = 0
+            last_report = now
         time.sleep(period)
 
 
 def run_follower(robot, gripper, sock):
+    rx = applied = 0
+    last_report = time.monotonic()
     while True:
         data = sock.recv(2048)
+        rx += 1
         try:
             while True:  # drain anything queued: act on the freshest sample only
                 data = sock.recv(2048, socket.MSG_DONTWAIT)
+                rx += 1
         except BlockingIOError:
             pass
         msg = json.loads(data)
-        joints = msg["joints"]
-        print(f"rx joints: {[round(j, 4) for j in joints]} gripper: {msg.get('gripper')}", flush=True)
-        robot.move_j(joints)
+        robot.move_j(msg["joints"])
         if gripper and msg.get("gripper") is not None:
             gripper.move_gripper_m(msg["gripper"])
+        applied += 1
+        now = time.monotonic()
+        if now - last_report >= 1.0:
+            # age trends matter more than the absolute value (rig clocks differ)
+            age_ms = (time.time() - msg["t"]) * 1000.0
+            print(f"rx {rx / (now - last_report):.0f}Hz applied {applied / (now - last_report):.0f}Hz"
+                  f" age {age_ms:+.1f}ms joints: {[round(j, 4) for j in msg['joints']]}"
+                  f" gripper: {msg.get('gripper')}", flush=True)
+            rx = applied = 0
+            last_report = now
 
 
 def main():
