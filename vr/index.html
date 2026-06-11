@@ -35,9 +35,17 @@ function buttonMask(gp) {
 
 document.getElementById("enter").onclick = async () => {
   if (!navigator.xr) { status.textContent = "WebXR not available"; return; }
-  const session = await navigator.xr.requestSession("immersive-vr", {
-    optionalFeatures: ["local-floor"],
-  });
+  // immersive-ar = passthrough on Quest; fall back to VR if unavailable.
+  let session;
+  try {
+    session = await navigator.xr.requestSession("immersive-ar", {
+      optionalFeatures: ["local-floor"],
+    });
+  } catch {
+    session = await navigator.xr.requestSession("immersive-vr", {
+      optionalFeatures: ["local-floor"],
+    });
+  }
 
   // WebXR requires a base layer even though we render nothing.
   const canvas = document.createElement("canvas");
@@ -51,6 +59,10 @@ document.getElementById("enter").onclick = async () => {
   let seq = 0;
   session.requestAnimationFrame(function onFrame(t, frame) {
     session.requestAnimationFrame(onFrame);
+    // Clear to transparent so passthrough shows instead of black.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, session.renderState.baseLayer.framebuffer);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
     const controllers = [];
     for (const src of session.inputSources) {
       if (!src.gripSpace) continue;

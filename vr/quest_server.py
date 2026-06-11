@@ -32,7 +32,7 @@ HERE = Path(__file__).parent
 
 CSV_FIELDS = ["t_recv", "t_quest", "hand", "px", "py", "pz",
               "qx", "qy", "qz", "qw", "trigger", "grip",
-              "thumb_x", "thumb_y", "buttons"]
+              "thumb_x", "thumb_y", "thumb_click", "btn_ax", "btn_by", "buttons"]
 
 
 def ensure_cert(cert: Path, key: Path):
@@ -73,6 +73,9 @@ class Collector:
     def handle(self, msg: dict):
         t_recv = time.time()
         for c in msg.get("controllers", []):
+            # xr-standard gamepad bitmask: 0 trigger, 1 grip, 3 thumbstick click,
+            # 4 A/X, 5 B/Y
+            mask = c.get("buttons", 0)
             row = {
                 "t_recv": f"{t_recv:.6f}", "t_quest": msg.get("t", ""),
                 "hand": c["hand"],
@@ -80,7 +83,9 @@ class Collector:
                 "qx": c["quat"][0], "qy": c["quat"][1], "qz": c["quat"][2], "qw": c["quat"][3],
                 "trigger": c.get("trigger", 0), "grip": c.get("grip", 0),
                 "thumb_x": c.get("thumb", [0, 0])[0], "thumb_y": c.get("thumb", [0, 0])[1],
-                "buttons": c.get("buttons", 0),
+                "thumb_click": (mask >> 3) & 1,
+                "btn_ax": (mask >> 4) & 1, "btn_by": (mask >> 5) & 1,
+                "buttons": mask,
             }
             self.writer.writerow(row)
             self.count += 1
