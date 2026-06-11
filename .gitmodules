@@ -1,0 +1,12 @@
+[submodule "leader/piper_sdk"]
+	path = leader/piper_sdk
+	url = https://github.com/agilexrobotics/piper_sdk.git
+[submodule "leader/pyAgxArm"]
+	path = leader/pyAgxArm
+	url = https://github.com/agilexrobotics/pyAgxArm.git
+[submodule "follower/piper_sdk"]
+	path = follower/piper_sdk
+	url = https://github.com/agilexrobotics/piper_sdk.git
+[submodule "follower/pyAgxArm"]
+	path = follower/pyAgxArm
+	url = https://github.com/agilexrobotics/pyAgxArm.git
