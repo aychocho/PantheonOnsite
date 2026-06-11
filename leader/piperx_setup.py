@@ -7,6 +7,7 @@ Follower rig: applies joint angles from a SUB socket to the local arm.
     python piperx_setup.py --leader                            # binds tcp://*:8080
     python piperx_setup.py --follower                          # connects to localhost:8080
     python piperx_setup.py --follower --addr tcp://10.103.0.45:8080   # cross-rig later
+    python piperx_setup.py --home --can can0                   # return arm to zero pose
 
 --leader polls the arm's joint feedback at --rate (default 100Hz) and publishes
 it; it does not change the arm's control mode. Use the teach button to put the
@@ -57,6 +58,18 @@ def connect_arm(channel, require_feedback=True):
     return robot
 
 
+def enter_can_ctrl(robot):
+    """Out of standby/teach into CAN control: reset -> joint mode -> enable
+    (per the AgileX double_piper guide). The arm goes limp briefly."""
+    robot.reset()
+    time.sleep(1.0)
+    robot.set_motion_mode(robot.OPTIONS.MOTION_MODE.J)
+    time.sleep(0.2)
+    while not robot.enable():
+        time.sleep(0.01)
+    robot.set_speed_percent(SPEED_PERCENT)
+
+
 def run_leader(robot, gripper, sock, rate):
     period = 1.0 / rate
     while True:
@@ -89,6 +102,7 @@ def main():
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--leader", action="store_true", help="stream joint angles out")
     mode.add_argument("--follower", action="store_true", help="stream joint angles in")
+    mode.add_argument("--home", action="store_true", help="move the arm to the zero pose and exit")
     ap.add_argument("--addr", default=None,
                     help="override: leader bind addr / follower connect addr (default: localhost, port 8080)")
     ap.add_argument("--port", type=int, default=8080, help="port (default: 8080)")
@@ -96,7 +110,23 @@ def main():
     ap.add_argument("--rate", type=float, default=100.0, help="leader publish rate in Hz (default: 100)")
     args = ap.parse_args()
 
-    robot = connect_arm(args.can, require_feedback=args.follower)
+    robot = connect_arm(args.can, require_feedback=args.follower or args.home)
+
+    if args.home:
+        print("Homing: entering CAN control (arm may sag briefly), then moving to zero pose.", flush=True)
+        enter_can_ctrl(robot)
+        robot.move_j([0.0] * robot.joint_nums)
+        time.sleep(0.5)
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            st = robot.get_arm_status()
+            if st is not None and getattr(st.msg, "motion_status", None) == 0:
+                print("Home reached:", [round(j, 4) for j in robot.get_joint_angles().msg])
+                return
+            time.sleep(0.1)
+        print("Timed out waiting for home (15s).")
+        return
+
     try:
         gripper = robot.init_effector(robot.OPTIONS.EFFECTOR.AGX_GRIPPER)
     except Exception:
@@ -118,16 +148,8 @@ def main():
             sock.setsockopt(zmq.CONFLATE, 1)  # must be set before connect
             sock.setsockopt_string(zmq.SUBSCRIBE, "")
             sock.connect(addr)
-            # Out of standby/teach into CAN control: reset -> joint mode -> enable
-            # (per the AgileX double_piper guide). The arm goes limp briefly.
             print("Resetting arm into CAN control mode — it may sag briefly.", flush=True)
-            robot.reset()
-            time.sleep(1.0)
-            robot.set_motion_mode(robot.OPTIONS.MOTION_MODE.J)
-            time.sleep(0.2)
-            while not robot.enable():
-                time.sleep(0.01)
-            robot.set_speed_percent(SPEED_PERCENT)
+            enter_can_ctrl(robot)
             print(f"Follower: arm on {args.can} enabled, listening on {addr}", flush=True)
             run_follower(robot, gripper, sock)
     except KeyboardInterrupt:

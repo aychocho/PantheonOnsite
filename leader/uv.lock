@@ -111,29 +111,16 @@ wheels = [
 ]
 
 [[package]]
-name = "piper-sdk"
-version = "0.6.1"
-source = { editable = "piper_sdk" }
-dependencies = [
-    { name = "python-can" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "python-can", specifier = ">=3.3.4" }]
-
-[[package]]
 name = "piper-teleop"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "piper-sdk" },
     { name = "pyagxarm" },
     { name = "pyzmq" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "piper-sdk", editable = "piper_sdk" },
     { name = "pyagxarm", editable = "pyAgxArm" },
     { name = "pyzmq", specifier = ">=26" },
 ]

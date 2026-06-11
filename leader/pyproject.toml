@@ -5,10 +5,8 @@ description = "ZMQ joint-angle controller for AgileX PiPER arms"
 requires-python = ">=3.9"
 dependencies = [
     "pyzmq>=26",
-    "piper_sdk",
     "pyagxarm",
 ]
 
 [tool.uv.sources]
-piper_sdk = { path = "piper_sdk", editable = true }
 pyagxarm = { path = "pyAgxArm", editable = true }
