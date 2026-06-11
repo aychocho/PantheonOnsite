@@ -18,8 +18,15 @@ import logging
 import signal
 import sys
 import time
+from pathlib import Path
 
 import zmq
+
+# The repo's `piper_sdk/` checkout (setup.py dir) shadows the installed package
+# when running from this directory; point imports at the real package inside it.
+_sdk_repo = Path(__file__).resolve().parent / "piper_sdk"
+if (_sdk_repo / "piper_sdk").is_dir():
+    sys.path.insert(0, str(_sdk_repo))
 
 from piper_sdk import C_PiperInterface_V2
 
