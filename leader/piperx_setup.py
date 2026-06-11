@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""PiperX bring-up test using the pyAgxArm SDK.
+"""PiperX teleop link over ZMQ (pyAgxArm SDK).
 
-Connects over CAN, enables the arm, and prints firmware/state to verify the
-stack end to end. Read-only by default; --move adds a small joint sweep.
+Leader rig:   streams the local arm's joint angles out on a PUB socket.
+Follower rig: applies joint angles from a SUB socket to the local arm.
 
-    python piperx_setup.py                 # connect + enable + read state
-    python piperx_setup.py --move          # also sweep joints and return to zero
-    python piperx_setup.py --can can1      # non-default CAN channel
+    python piperx_setup.py --leader                            # binds tcp://*:8080
+    python piperx_setup.py --follower                          # connects to localhost:8080
+    python piperx_setup.py --follower --addr tcp://10.103.0.45:8080   # cross-rig later
 
-Prerequisite: CAN must be up, e.g.
-    sudo ip link set can0 up type can bitrate 1000000
+--leader polls the arm's joint feedback at --rate (default 100Hz) and publishes
+it; it does not change the arm's control mode. Use the teach button to put the
+arm in drag mode for hand-guiding.
+CAN must be up first: sudo ip link set can0 up type can bitrate 1000000
 """
 
 import argparse
+import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -23,111 +27,112 @@ _sdk_repo = Path(__file__).resolve().parent / "pyAgxArm"
 if (_sdk_repo / "pyAgxArm").is_dir():
     sys.path.insert(0, str(_sdk_repo))
 
+import zmq
 from pyAgxArm import AgxArmFactory, ArmModel, PiperFW, create_agx_arm_config
 
-FW_CHOICES = {"default": PiperFW.DEFAULT, "v183": PiperFW.V183, "v188": PiperFW.V188}
-
-# PiperX limits (pyAgxArm/api/constants.py): j2 in [0, pi] and j3 in [-2.967, 0],
-# so the all-zero home pose sits exactly ON both limits — test poses pull them
-# off-limit. j4/j5 are tighter on PiperX (+/-1.553) than piper_h/l.
-SWEEP_POSES = [
-    [0.0, 0.4, -0.4, 0.0, -0.4, 0.0],  # ready pose: docs' canonical move_j example
-    [0.3, 0.6, -0.6, 0.3, -0.3, 0.5],  # exercises all six joints, mid-range
-    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],    # home: folded, safe to disable/power down
-]
+SPEED_PERCENT = 50  # follower tracking speed, matches joint_controller.py default
 
 
-def check_can_up(channel):
-    state_file = Path(f"/sys/class/net/{channel}/operstate")
-    if not state_file.exists():
-        return f"CAN interface '{channel}' does not exist."
-    if state_file.read_text().strip() == "down":
-        return (f"CAN interface '{channel}' is DOWN. Bring it up with:\n"
-                f"  sudo ip link set {channel} up type can bitrate 1000000")
-    return None
+def connect_arm(channel, require_feedback=True):
+    cfg = create_agx_arm_config(
+        robot=ArmModel.PIPER_X,
+        firmeware_version=PiperFW.DEFAULT,
+        interface=os.environ.get("PIPERX_INTERFACE", "socketcan"),
+        channel=channel,
+    )
+    robot = AgxArmFactory.create_arm(cfg)
+    robot.connect()
+    # Link check: a normal arm streams feedback unsolicited; a master/leader
+    # arm sends control frames instead, and may be quiet until it is moved.
+    deadline = time.monotonic() + 2.0
+    while robot.get_joint_angles() is None and robot.get_leader_joint_angles() is None:
+        if time.monotonic() > deadline:
+            if require_feedback:
+                sys.exit(f"No data from arm on '{channel}'. Check arm power and CAN cable;\n"
+                         f"if needed: sudo ip link set {channel} up type can bitrate 1000000")
+            print(f"No data from arm on '{channel}' yet — master arms can be quiet at rest; "
+                  "continuing, drag the arm to start the stream.", flush=True)
+            break
+        time.sleep(0.05)
+    return robot
 
 
-def wait_motion_done(robot, timeout=10.0):
-    time.sleep(0.5)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        status = robot.get_arm_status()
-        if status is not None and getattr(status.msg, "motion_status", None) == 0:
-            return True
-        time.sleep(0.1)
-    print(f"  WARNING: motion not confirmed done within {timeout:.0f}s")
-    return False
+def run_leader(robot, gripper, sock, rate):
+    period = 1.0 / rate
+    while True:
+        # Poll the standard feedback; fall back to master-arm frames in case
+        # the arm is still configured as a leader/master.
+        ja = robot.get_joint_angles() or robot.get_leader_joint_angles()
+        if ja is not None:
+            msg = {"joints": list(ja.msg), "t": time.time()}
+            gs = gripper.get_gripper_status() if gripper else None
+            if gs is not None and gs.msg.mode == "width":
+                msg["gripper"] = gs.msg.value  # meters
+            sock.send_string(json.dumps(msg))
+            print(f"tx joints: {[round(j, 4) for j in msg['joints']]}"
+                  f" gripper: {msg.get('gripper')} (feedback {ja.hz:.0f}Hz)", flush=True)
+        time.sleep(period)
+
+
+def run_follower(robot, gripper, sock):
+    while True:
+        msg = json.loads(sock.recv())  # CONFLATE: always the freshest sample
+        joints = msg["joints"]
+        print(f"rx joints: {[round(j, 4) for j in joints]} gripper: {msg.get('gripper')}", flush=True)
+        robot.move_j(joints)
+        if gripper and msg.get("gripper") is not None:
+            gripper.move_gripper_m(msg["gripper"])
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--leader", action="store_true", help="stream joint angles out")
+    mode.add_argument("--follower", action="store_true", help="stream joint angles in")
+    ap.add_argument("--addr", default=None,
+                    help="override: leader bind addr / follower connect addr (default: localhost, port 8080)")
+    ap.add_argument("--port", type=int, default=8080, help="port (default: 8080)")
     ap.add_argument("--can", default="can0", help="CAN channel (default: can0)")
-    ap.add_argument("--interface", default="socketcan",
-                    help="python-can interface: socketcan, virtual, slcan (default: socketcan)")
-    ap.add_argument("--fw", choices=FW_CHOICES, default="default",
-                    help="firmware family: default (<=S-V1.8-2), v183, v188 (>=S-V1.8-8)")
-    ap.add_argument("--move", action="store_true", help="run a small joint sweep (arm will move!)")
-    ap.add_argument("--speed", type=int, default=20, help="speed percent for --move (default: 20)")
-    ap.add_argument("--timeout", type=float, default=10.0, help="enable timeout in seconds (default: 10)")
+    ap.add_argument("--rate", type=float, default=100.0, help="leader publish rate in Hz (default: 100)")
     args = ap.parse_args()
 
-    if args.interface == "socketcan":
-        err = check_can_up(args.can)
-        if err:
-            print(err)
-            return 1
-
-    print(f"[1/4] Connecting to PiperX on {args.can} (fw={args.fw}) ...")
-    cfg = create_agx_arm_config(
-        robot=ArmModel.PIPER_X,
-        firmeware_version=FW_CHOICES[args.fw],
-        interface=args.interface,
-        channel=args.can,
-    )
-    robot = AgxArmFactory.create_arm(cfg)
-    robot.connect()
-
-    print(f"[2/4] Enabling arm (timeout {args.timeout:.0f}s) ...")
-    deadline = time.monotonic() + args.timeout
-    while not robot.enable():
-        if time.monotonic() > deadline:
-            print(f"FAIL: arm did not enable within {args.timeout:.0f}s.")
-            rx = Path(f"/sys/class/net/{args.can}/statistics/rx_packets")
-            if rx.exists() and rx.read_text().strip() == "0":
-                print(f"  No frames received on {args.can}: the bus is silent. Check that the\n"
-                      f"  arm is powered (24V, LED on) and the CAN cable is plugged in, then\n"
-                      f"  reset the interface to flush the TX queue:\n"
-                      f"    sudo ip link set {args.can} down\n"
-                      f"    sudo ip link set {args.can} up type can bitrate 1000000")
-            return 1
-        time.sleep(0.01)
-    print("  arm enabled")
-
-    print("[3/4] Reading state ...")
-    time.sleep(0.5)  # let feedback streams populate
-    fw = robot.get_firmware()  # returns a plain dict, not a MessageAbstract
-    print(f"  firmware:     {fw['software_version']} (hw {fw['hardware_version']})" if fw else "  firmware:     n/a")
-    status = robot.get_arm_status()
-    print(f"  arm status:   {status.msg if status else 'n/a'}")
-    ja = robot.get_joint_angles()
-    print(f"  joints (rad): {ja.msg if ja else 'n/a'}  ({ja.hz:.0f}Hz)" if ja else "  joints: n/a")
-    pose = robot.get_flange_pose()
-    print(f"  flange pose:  {pose.msg if pose else 'n/a'}")
-    print(f"  feedback ok:  {robot.is_ok()}")
-
-    if args.move:
-        print(f"[4/4] Motion test at {args.speed}% speed ...")
-        robot.set_speed_percent(args.speed)
-        for pose in SWEEP_POSES:
-            print(f"  move_j {pose}")
-            robot.move_j(pose)
-            wait_motion_done(robot)
-    else:
-        print("[4/4] Skipping motion test (pass --move to enable)")
-
-    print("PASS: PiperX setup OK")
-    return 0
+    robot = connect_arm(args.can, require_feedback=args.follower)
+    try:
+        gripper = robot.init_effector(robot.OPTIONS.EFFECTOR.AGX_GRIPPER)
+    except Exception:
+        gripper = None
+    ctx = zmq.Context()
+    try:
+        if args.leader:
+            addr = args.addr or f"tcp://*:{args.port}"
+            sock = ctx.socket(zmq.PUB)
+            sock.bind(addr)
+            st = robot.get_arm_status()
+            mode = getattr(st.msg, "ctrl_mode", "unknown") if st else "unknown"
+            print(f"Leader: arm on {args.can} (ctrl mode: {mode}), publishing {addr} @ {args.rate:.0f}Hz",
+                  flush=True)
+            run_leader(robot, gripper, sock, args.rate)
+        else:
+            addr = args.addr or f"tcp://localhost:{args.port}"
+            sock = ctx.socket(zmq.SUB)
+            sock.setsockopt(zmq.CONFLATE, 1)  # must be set before connect
+            sock.setsockopt_string(zmq.SUBSCRIBE, "")
+            sock.connect(addr)
+            # Out of standby/teach into CAN control: reset -> joint mode -> enable
+            # (per the AgileX double_piper guide). The arm goes limp briefly.
+            print("Resetting arm into CAN control mode — it may sag briefly.", flush=True)
+            robot.reset()
+            time.sleep(1.0)
+            robot.set_motion_mode(robot.OPTIONS.MOTION_MODE.J)
+            time.sleep(0.2)
+            while not robot.enable():
+                time.sleep(0.01)
+            robot.set_speed_percent(SPEED_PERCENT)
+            print(f"Follower: arm on {args.can} enabled, listening on {addr}", flush=True)
+            run_follower(robot, gripper, sock)
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
