@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "ZMQ joint-angle controller for AgileX PiPER arms"
 requires-python = ">=3.9"
 dependencies = [
-    "pyzmq>=26",
     "pyagxarm",
 ]
 

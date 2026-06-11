@@ -15,3 +15,8 @@ venv/
 
 # Logs
 *.log
+
+# Quest VR
+vr/logs/
+vr/cert.pem
+vr/key.pem

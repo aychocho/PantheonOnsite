@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quest Pose Streamer</title>
+<style>
+  body { font-family: monospace; background: #111; color: #ddd; margin: 2em; }
+  button { font-size: 1.5em; padding: 0.5em 1.5em; }
+  #status { margin-top: 1em; white-space: pre; }
+</style>
+</head>
+<body>
+<h2>Quest Controller Pose Streamer</h2>
+<button id="enter">Enter VR</button>
+<div id="status">Connecting WebSocket...</div>
+<script>
+const status = document.getElementById("status");
+let ws = null;
+
+function connectWS() {
+  ws = new WebSocket(`wss://${location.host}/ws`);
+  ws.onopen = () => { status.textContent = "WebSocket connected. Tap Enter VR."; };
+  ws.onclose = () => { status.textContent = "WebSocket closed, retrying..."; setTimeout(connectWS, 1000); };
+}
+connectWS();
+
+// Gamepad button bitmask: bit i = buttons[i].pressed
+// (xr-standard mapping: 0 trigger, 1 squeeze, 3 thumbstick, 4 A/X, 5 B/Y)
+function buttonMask(gp) {
+  let m = 0;
+  gp.buttons.forEach((b, i) => { if (b.pressed) m |= 1 << i; });
+  return m;
+}
+
+document.getElementById("enter").onclick = async () => {
+  if (!navigator.xr) { status.textContent = "WebXR not available"; return; }
+  // immersive-ar = passthrough on Quest; fall back to VR if unavailable.
+  let session;
+  try {
+    session = await navigator.xr.requestSession("immersive-ar", {
+      optionalFeatures: ["local-floor"],
+    });
+  } catch {
+    session = await navigator.xr.requestSession("immersive-vr", {
+      optionalFeatures: ["local-floor"],
+    });
+  }
+
+  // WebXR requires a base layer even though we render nothing.
+  const canvas = document.createElement("canvas");
+  const gl = canvas.getContext("webgl", { xrCompatible: true });
+  await session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+
+  let refSpace;
+  try { refSpace = await session.requestReferenceSpace("local-floor"); }
+  catch { refSpace = await session.requestReferenceSpace("local"); }
+
+  let seq = 0;
+  session.requestAnimationFrame(function onFrame(t, frame) {
+    session.requestAnimationFrame(onFrame);
+    // Clear to transparent so passthrough shows instead of black.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, session.renderState.baseLayer.framebuffer);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    const controllers = [];
+    for (const src of session.inputSources) {
+      if (!src.gripSpace) continue;
+      const pose = frame.getPose(src.gripSpace, refSpace);
+      if (!pose) continue;
+      const p = pose.transform.position, q = pose.transform.orientation;
+      const c = {
+        hand: src.handedness,
+        pos: [p.x, p.y, p.z],
+        quat: [q.x, q.y, q.z, q.w],
+      };
+      if (src.gamepad) {
+        const gp = src.gamepad;
+        c.trigger = gp.buttons[0] ? gp.buttons[0].value : 0;
+        c.grip = gp.buttons[1] ? gp.buttons[1].value : 0;
+        c.thumb = [gp.axes[2] || 0, gp.axes[3] || 0];
+        c.buttons = buttonMask(gp);
+      }
+      controllers.push(c);
+    }
+    if (controllers.length && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ t: performance.now() / 1000, seq: seq++, controllers }));
+    }
+  });
+
+  session.onend = () => { status.textContent = "VR session ended."; };
+  status.textContent = "Streaming...";
+};
+</script>
+</body>
+</html>
