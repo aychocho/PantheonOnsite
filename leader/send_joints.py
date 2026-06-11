@@ -30,7 +30,9 @@ def main():
     ctx = zmq.Context()
     sock = ctx.socket(zmq.PUB)
     sock.connect(args.connect)
-    time.sleep(0.2)  # let the connection establish
+    # ZMQ slow joiner: messages sent before the subscription propagates are
+    # dropped. The sleep covers most of it; continuous streaming covers the rest.
+    time.sleep(0.2)
 
     print(f"Publishing to {args.connect} at {args.rate}Hz (Ctrl-C to stop)")
     period = 1.0 / args.rate
