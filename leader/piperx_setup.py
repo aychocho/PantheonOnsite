@@ -105,8 +105,8 @@ def main():
 
     print("[3/4] Reading state ...")
     time.sleep(0.5)  # let feedback streams populate
-    fw = robot.get_firmware()
-    print(f"  firmware:     {fw.msg if fw else 'n/a'}")
+    fw = robot.get_firmware()  # returns a plain dict, not a MessageAbstract
+    print(f"  firmware:     {fw['software_version']} (hw {fw['hardware_version']})" if fw else "  firmware:     n/a")
     status = robot.get_arm_status()
     print(f"  arm status:   {status.msg if status else 'n/a'}")
     ja = robot.get_joint_angles()
