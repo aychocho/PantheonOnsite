@@ -91,7 +91,7 @@ def discover_leader(iface, port, timeout=15.0):
         s.close()
 
 
-def connect_arm(channel, require_feedback=True):
+def connect_arm(channel):
     cfg = create_agx_arm_config(
         robot=ArmModel.PIPER_X,
         firmeware_version=PiperFW.DEFAULT,
@@ -100,17 +100,12 @@ def connect_arm(channel, require_feedback=True):
     )
     robot = AgxArmFactory.create_arm(cfg)
     robot.connect()
-    # Link check: a normal arm streams feedback unsolicited; a master/leader
-    # arm sends control frames instead, and may be quiet until it is moved.
+    # Link check: a powered arm streams feedback unsolicited at 200Hz.
     deadline = time.monotonic() + 2.0
-    while robot.get_joint_angles() is None and robot.get_leader_joint_angles() is None:
+    while robot.get_joint_angles() is None:
         if time.monotonic() > deadline:
-            if require_feedback:
-                sys.exit(f"No data from arm on '{channel}'. Check arm power and CAN cable;\n"
-                         f"if needed: sudo ip link set {channel} up type can bitrate 1000000")
-            print(f"No data from arm on '{channel}' yet — master arms can be quiet at rest; "
-                  "continuing, drag the arm to start the stream.", flush=True)
-            break
+            sys.exit(f"No data from arm on '{channel}'. Check arm power and CAN cable;\n"
+                     f"if needed: sudo ip link set {channel} up type can bitrate 1000000")
         time.sleep(0.05)
     return robot
 
@@ -130,9 +125,7 @@ def enter_can_ctrl(robot):
 def run_leader(robot, gripper, sock, rate):
     period = 1.0 / rate
     while True:
-        # Poll the standard feedback; fall back to master-arm frames in case
-        # the arm is still configured as a leader/master.
-        ja = robot.get_joint_angles() or robot.get_leader_joint_angles()
+        ja = robot.get_joint_angles()
         if ja is not None:
             msg = {"joints": list(ja.msg), "t": time.time()}
             gs = gripper.get_gripper_status() if gripper else None
@@ -173,7 +166,7 @@ def main():
     # Resolve/validate networking before touching the arm.
     net_ip = iface_ipv4(args.net) if args.net else None
 
-    robot = connect_arm(args.can, require_feedback=args.follower or args.home)
+    robot = connect_arm(args.can)
 
     if args.home:
         print("Homing: entering CAN control (arm may sag briefly), then moving to zero pose.", flush=True)
