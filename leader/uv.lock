@@ -127,13 +127,29 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "piper-sdk" },
+    { name = "pyagxarm" },
     { name = "pyzmq" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "piper-sdk", editable = "piper_sdk" },
+    { name = "pyagxarm", editable = "pyAgxArm" },
     { name = "pyzmq", specifier = ">=26" },
+]
+
+[[package]]
+name = "pyagxarm"
+source = { editable = "pyAgxArm" }
+dependencies = [
+    { name = "python-can" },
+    { name = "typing-extensions" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "python-can", specifier = ">=3.3.4" },
+    { name = "typing-extensions", specifier = ">=3.7.4.3" },
 ]
 
 [[package]]
