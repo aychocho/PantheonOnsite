@@ -1,0 +1,4 @@
+alias toLead='ssh pantheon@10.103.0.45'
+#pwd pantheon
+alias toFollow='ssh pantheon@10.103.0.74'
+#pwd ubuntu123
