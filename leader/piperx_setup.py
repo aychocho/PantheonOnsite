@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """PiperX teleop link over UDP (pyAgxArm SDK).
 
-Leader rig:   streams the local arm's joint angles as JSON datagrams.
-Follower rig: listens on --port and applies the freshest sample to the arm.
+Leader rig:   streams the local arm's joint angles as 40-byte binary datagrams.
+Follower rig: listens on --port, aligns to the leader pose with a planned
+move_j, then tracks with unsmoothed high-follow (move_js) — keep the e-stop
+within reach; this mode has no trajectory planning.
 
     python piperx_setup.py --leader                            # sends to 127.0.0.1:8080
     python piperx_setup.py --leader --net enp6s0               # broadcast on that interface's subnet
@@ -18,7 +20,7 @@ CAN must be up first: sudo ip link set can0 up type can bitrate 1000000
 
 import argparse
 import fcntl
-import json
+import math
 import os
 import socket
 import struct
@@ -34,7 +36,10 @@ if (_sdk_repo / "pyAgxArm").is_dir():
 
 from pyAgxArm import AgxArmFactory, ArmModel, PiperFW, create_agx_arm_config
 
-SPEED_PERCENT = 50  # follower tracking speed
+SPEED_PERCENT = 100  # used by move_j paths (--home, follower alignment)
+
+# Wire format: little-endian | t: float64 | seq: uint32 | j1..j6: float32 | gripper: float32 (NaN = none)
+WIRE = struct.Struct("<dI6ff")  # 40 bytes
 
 
 def _iface_addr(iface, ioctl_code):
@@ -95,23 +100,24 @@ def run_leader(robot, gripper, sock, target, rate):
     # Status is printed once per second, NOT per sample: blocking on a slow
     # terminal/ssh stdout at 100Hz stalls the control loop and builds lag.
     period = 1.0 / rate
-    sent = 0
+    seq = sent = 0
+    joints = grip = None
     last_report = time.monotonic()
     while True:
         ja = robot.get_joint_angles()
         if ja is not None:
-            msg = {"joints": list(ja.msg), "t": time.time()}
+            joints = list(ja.msg)
             gs = gripper.get_gripper_status() if gripper else None
-            if gs is not None and gs.msg.mode == "width":
-                msg["gripper"] = gs.msg.value  # meters
-            sock.sendto(json.dumps(msg).encode(), target)
+            grip = gs.msg.value if gs is not None and gs.msg.mode == "width" else None  # meters
+            sock.sendto(WIRE.pack(time.time(), seq, *joints, math.nan if grip is None else grip), target)
+            seq += 1
             sent += 1
         now = time.monotonic()
         if now - last_report >= 1.0:
             if ja is not None:
                 print(f"tx {sent / (now - last_report):.0f}Hz"
-                      f" joints: {[round(j, 4) for j in msg['joints']]}"
-                      f" gripper: {msg.get('gripper')} (feedback {ja.hz:.0f}Hz)", flush=True)
+                      f" joints: {[round(j, 4) for j in joints]}"
+                      f" gripper: {grip} (feedback {ja.hz:.0f}Hz)", flush=True)
             else:
                 print("tx 0Hz (no arm feedback)", flush=True)
             sent = 0
@@ -121,6 +127,8 @@ def run_leader(robot, gripper, sock, target, rate):
 
 def run_follower(robot, gripper, sock):
     rx = applied = 0
+    last_seq = -1
+    aligned = False
     last_report = time.monotonic()
     while True:
         data = sock.recv(2048)
@@ -131,18 +139,40 @@ def run_follower(robot, gripper, sock):
                 rx += 1
         except BlockingIOError:
             pass
-        msg = json.loads(data)
-        robot.move_j(msg["joints"])
-        if gripper and msg.get("gripper") is not None:
-            gripper.move_gripper_m(msg["gripper"])
+        if len(data) != WIRE.size:
+            continue
+        vals = WIRE.unpack(data)
+        t, seq = vals[0], vals[1]
+        joints, grip = list(vals[2:8]), vals[8]
+        if seq <= last_seq:  # reordered/stale datagram
+            continue
+        last_seq = seq
+        if not aligned:
+            # move_js is unsmoothed MIT pass-through: snap-to-target from a
+            # distant pose is dangerous, so align with a planned move_j first.
+            print(f"Aligning to leader pose with move_j: {[round(j, 4) for j in joints]} ...", flush=True)
+            robot.move_j(joints)
+            time.sleep(0.5)
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                st = robot.get_arm_status()
+                if st is not None and getattr(st.msg, "motion_status", None) == 0:
+                    break
+                time.sleep(0.1)
+            aligned = True
+            print("Aligned — switching to high-follow (move_js, no smoothing).", flush=True)
+        else:
+            robot.move_js(joints)
+        if gripper and not math.isnan(grip):
+            gripper.move_gripper_m(grip)
         applied += 1
         now = time.monotonic()
         if now - last_report >= 1.0:
             # age trends matter more than the absolute value (rig clocks differ)
-            age_ms = (time.time() - msg["t"]) * 1000.0
+            age_ms = (time.time() - t) * 1000.0
             print(f"rx {rx / (now - last_report):.0f}Hz applied {applied / (now - last_report):.0f}Hz"
-                  f" age {age_ms:+.1f}ms joints: {[round(j, 4) for j in msg['joints']]}"
-                  f" gripper: {msg.get('gripper')}", flush=True)
+                  f" age {age_ms:+.1f}ms joints: {[round(j, 4) for j in joints]}"
+                  f" gripper: {None if math.isnan(grip) else grip}", flush=True)
             rx = applied = 0
             last_report = now
 
