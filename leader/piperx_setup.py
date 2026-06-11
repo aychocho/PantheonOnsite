@@ -27,6 +27,15 @@ from pyAgxArm import AgxArmFactory, ArmModel, PiperFW, create_agx_arm_config
 
 FW_CHOICES = {"default": PiperFW.DEFAULT, "v183": PiperFW.V183, "v188": PiperFW.V188}
 
+# PiperX limits (pyAgxArm/api/constants.py): j2 in [0, pi] and j3 in [-2.967, 0],
+# so the all-zero home pose sits exactly ON both limits — test poses pull them
+# off-limit. j4/j5 are tighter on PiperX (+/-1.553) than piper_h/l.
+SWEEP_POSES = [
+    [0.0, 0.4, -0.4, 0.0, -0.4, 0.0],  # ready pose: docs' canonical move_j example
+    [0.3, 0.6, -0.6, 0.3, -0.3, 0.5],  # exercises all six joints, mid-range
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],    # home: folded, safe to disable/power down
+]
+
 
 def check_can_up(channel):
     state_file = Path(f"/sys/class/net/{channel}/operstate")
@@ -82,8 +91,14 @@ def main():
     deadline = time.monotonic() + args.timeout
     while not robot.enable():
         if time.monotonic() > deadline:
-            print(f"FAIL: arm did not enable within {args.timeout:.0f}s. "
-                  "Is it powered and connected to the CAN adapter?")
+            print(f"FAIL: arm did not enable within {args.timeout:.0f}s.")
+            rx = Path(f"/sys/class/net/{args.can}/statistics/rx_packets")
+            if rx.exists() and rx.read_text().strip() == "0":
+                print(f"  No frames received on {args.can}: the bus is silent. Check that the\n"
+                      f"  arm is powered (24V, LED on) and the CAN cable is plugged in, then\n"
+                      f"  reset the interface to flush the TX queue:\n"
+                      f"    sudo ip link set {args.can} down\n"
+                      f"    sudo ip link set {args.can} up type can bitrate 1000000")
             return 1
         time.sleep(0.01)
     print("  arm enabled")
@@ -103,13 +118,10 @@ def main():
     if args.move:
         print(f"[4/4] Motion test at {args.speed}% speed ...")
         robot.set_speed_percent(args.speed)
-        sweep = [0.0, 0.2, -0.2, 0.3, -0.2, 0.5][: robot.joint_nums]
-        print(f"  move_j {sweep}")
-        robot.move_j(sweep)
-        wait_motion_done(robot)
-        print("  move_j back to zero")
-        robot.move_j([0.0] * robot.joint_nums)
-        wait_motion_done(robot)
+        for pose in SWEEP_POSES:
+            print(f"  move_j {pose}")
+            robot.move_j(pose)
+            wait_motion_done(robot)
     else:
         print("[4/4] Skipping motion test (pass --move to enable)")
 
