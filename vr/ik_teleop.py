@@ -14,9 +14,11 @@ Hold the GRIP button to clutch in: the end-effector tracks your hand's
 position+orientation deltas (latched at grip press, so re-gripping never
 jumps). The analog TRIGGER sets gripper width (pulled = closed).
 
-Run on the rig (quest_server.py must target this machine: --udp <rig-ip>:5557):
-    uv run ik_teleop.py                 # sends to follower on 127.0.0.1:8080
-    uv run ik_teleop.py --dry-run       # print solutions, send nothing
+Runs on the same machine as quest_server.py (its default --udp 127.0.0.1:5557
+lands here directly):
+    uv run ik_teleop.py                          # follower on 127.0.0.1:8080
+    uv run ik_teleop.py --target <rig-ip>:8080   # follower on another machine
+    uv run ik_teleop.py --dry-run                # print solutions, send nothing
 """
 
 import argparse
