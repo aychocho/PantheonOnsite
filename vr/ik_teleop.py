@@ -127,3 +127,39 @@ class IkSolver:
         if step_cap is not None:
             q = np.clip(q0 + np.clip(q - q0, -step_cap, step_cap), lo, hi)
         return q
+
+
+class Teleop:
+    """Socket-free teleop core: feed Quest JSON dicts into tick(), get back
+    (q, gripper_width) to put on the wire."""
+
+    def __init__(self, solver, hand="right", scale=1.0, max_grip=0.07,
+                 step_cap=0.03):
+        self.solver = solver
+        self.hand = hand
+        self.clutch = Clutch(scale)
+        self.q = HOME.copy()
+        self.gripper = math.nan  # NaN on the wire = "no gripper command"
+        self.max_grip = max_grip
+        self.step_cap = step_cap
+        self.T_target = None
+        self.ik_err = 0.0
+
+    def tick(self, msg):
+        """Consume one Quest message (or None). Returns (q, gripper_width)."""
+        c = None
+        if msg:
+            c = next((c for c in msg.get("controllers", [])
+                      if c.get("hand") == self.hand), None)
+        if c is not None:
+            p = np.asarray(c["pos"], dtype=float)
+            R = quat_to_mat(*c["quat"])
+            anchor = self.solver.fk(self.q)
+            self.T_target = self.clutch.update(c.get("grip", 0.0), p, R, anchor)
+            self.gripper = (1.0 - float(c.get("trigger", 0.0))) * self.max_grip
+        if self.clutch.engaged and self.T_target is not None:
+            self.q = self.solver.solve(self.T_target, self.q,
+                                       step_cap=self.step_cap)
+            err = pin.log(self.solver.fk(self.q).actInv(self.T_target)).vector
+            self.ik_err = float(np.linalg.norm(err))
+        return self.q, self.gripper

@@ -8,7 +8,7 @@ import numpy as np
 import pinocchio as pin
 import pytest
 
-from ik_teleop import AXIS_MAP, DEFAULT_URDF, HOME, WIRE, Clutch, IkSolver, quat_to_mat
+from ik_teleop import AXIS_MAP, DEFAULT_URDF, HOME, WIRE, Clutch, IkSolver, Teleop, quat_to_mat
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -142,3 +142,61 @@ def test_solve_step_cap(solver):
     assert np.max(np.abs(q - HOME)) <= 0.02 + 1e-9
     assert np.all(q >= solver.model.lowerPositionLimit - 1e-9)
     assert np.all(q <= solver.model.upperPositionLimit + 1e-9)
+
+
+def _quest_msg(hand="right", pos=(0, 0, 0), quat=(0, 0, 0, 1), trigger=0.0, grip=0.0):
+    return {"t": 1.0, "controllers": [
+        {"hand": hand, "pos": list(pos), "quat": list(quat),
+         "trigger": trigger, "grip": grip}]}
+
+
+@pytest.fixture()
+def teleop(solver):
+    return Teleop(solver)
+
+
+def test_tick_holds_home_without_grip(teleop):
+    q, grip_m = teleop.tick(_quest_msg(grip=0.0))
+    assert np.allclose(q, HOME)
+    q, _ = teleop.tick(None)  # no sample this tick
+    assert np.allclose(q, HOME)
+
+
+def test_tick_ignores_other_hand(teleop):
+    q, _ = teleop.tick(_quest_msg(hand="left", grip=1.0, pos=(0, 0.2, 0)))
+    assert np.allclose(q, HOME)
+    assert not teleop.clutch.engaged
+
+
+def test_tick_tracks_while_gripped(teleop):
+    teleop.tick(_quest_msg(grip=1.0))                       # engage at origin
+    target_before = teleop.solver.fk(teleop.q).translation.copy()
+    for _ in range(50):                                      # move up 0.1m in XR => +z robot
+        q, _ = teleop.tick(_quest_msg(grip=1.0, pos=(0, 0.1, 0)))
+    moved = teleop.solver.fk(q).translation
+    assert moved[2] - target_before[2] > 0.08               # converged most of the way
+    assert not np.allclose(q, HOME)
+
+
+def test_tick_freezes_on_release(teleop):
+    teleop.tick(_quest_msg(grip=1.0))
+    for _ in range(50):
+        teleop.tick(_quest_msg(grip=1.0, pos=(0, 0.1, 0)))
+    q_held, _ = teleop.tick(_quest_msg(grip=0.0, pos=(0.5, 0.5, 0.5)))
+    q_after, _ = teleop.tick(_quest_msg(grip=0.0, pos=(-0.5, 0.1, 0.9)))
+    assert np.allclose(q_held, q_after)                      # frozen
+
+
+def test_trigger_maps_to_gripper_width(teleop):
+    _, w_open = teleop.tick(_quest_msg(trigger=0.0))
+    _, w_closed = teleop.tick(_quest_msg(trigger=1.0))
+    _, w_half = teleop.tick(_quest_msg(trigger=0.5))
+    assert math.isclose(w_open, 0.07)
+    assert math.isclose(w_closed, 0.0)
+    assert math.isclose(w_half, 0.035)
+
+
+def test_gripper_nan_until_first_sample(solver):
+    t = Teleop(solver)
+    _, w = t.tick(None)
+    assert math.isnan(w)
