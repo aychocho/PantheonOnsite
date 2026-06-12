@@ -188,7 +188,7 @@ def main():
                     help="gripper width at trigger=0, meters (default: 0.07)")
     ap.add_argument("--urdf", type=Path, default=DEFAULT_URDF)
     ap.add_argument("--dry-run", action="store_true",
-                    help="print instead of sending UDP to the follower")
+                    help="suppress UDP sends (status line still prints)")
     args = ap.parse_args()
 
     teleop = Teleop(IkSolver(args.urdf), hand=args.hand, scale=args.scale,
@@ -230,16 +230,21 @@ def main():
             print(f"Bad sample, skipping: {e}", flush=True)
             q, grip_m = teleop.q, teleop.gripper
 
-        pkt = WIRE.pack(time.time(), seq, *q, grip_m)
+        pkt = WIRE.pack(time.time(), seq & 0xFFFFFFFF, *q, grip_m)
         if not args.dry_run:
-            tx.sendto(pkt, target)
+            try:
+                tx.sendto(pkt, target)
+            except OSError as e:
+                # e.g. ECONNREFUSED on loopback before the follower starts
+                print(f"send error (follower up?): {e}", flush=True)
         seq += 1
 
         now = time.monotonic()
         if now - last_report >= 1.0:
             print(f"rx {rx_count / (now - last_report):.0f}Hz tx {args.rate:.0f}Hz "
                   f"clutch={'ON' if teleop.clutch.engaged else 'off'} "
-                  f"ik_err={teleop.ik_err:.4f} grip={grip_m:.3f} "
+                  f"ik_err={teleop.ik_err:.4f} "
+                  f"grip={None if math.isnan(grip_m) else round(grip_m, 3)} "
                   f"q={[round(float(v), 3) for v in q]}", flush=True)
             rx_count = 0
             last_report = now
