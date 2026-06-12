@@ -246,6 +246,9 @@ def main():
                   f"ik_err={teleop.ik_err:.4f} "
                   f"grip={None if math.isnan(grip_m) else round(grip_m, 3)} "
                   f"q={[round(float(v), 3) for v in q]}", flush=True)
+            if teleop.clutch.engaged and teleop.ik_err > 0.01:
+                print("WARN: IK not converged - target at/near workspace "
+                      "boundary? Release grip and re-engage closer.", flush=True)
             rx_count = 0
             last_report = now
 
