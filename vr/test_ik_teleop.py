@@ -5,8 +5,9 @@ import math
 from pathlib import Path
 
 import numpy as np
+import pinocchio as pin
 
-from ik_teleop import AXIS_MAP, WIRE, quat_to_mat
+from ik_teleop import AXIS_MAP, WIRE, Clutch, quat_to_mat
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -42,11 +43,6 @@ def test_quat_to_mat_identity_and_known():
     # Unnormalized input is normalized internally
     R2 = quat_to_mat(0, 0, 2 * s, 2 * math.cos(math.pi / 4))
     assert np.allclose(R, R2)
-
-
-import pinocchio as pin
-
-from ik_teleop import Clutch
 
 
 def _se3(R=None, p=(0, 0, 0)):
