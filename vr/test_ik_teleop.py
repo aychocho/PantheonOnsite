@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 
-import ik_teleop
 from ik_teleop import AXIS_MAP, WIRE, quat_to_mat
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,8 +27,10 @@ def test_axis_map_is_rotation():
 def test_axis_map_directions():
     up_xr = np.array([0.0, 1.0, 0.0])          # XR +y (up)
     toward_user_xr = np.array([0.0, 0.0, 1.0])  # XR +z (toward user)
+    right_xr = np.array([1.0, 0.0, 0.0])        # XR +x (right)
     assert np.allclose(AXIS_MAP @ up_xr, [0, 0, 1])           # robot +z (up)
     assert np.allclose(AXIS_MAP @ toward_user_xr, [-1, 0, 0])  # robot -x (backward)
+    assert np.allclose(AXIS_MAP @ right_xr, [0, -1, 0])        # robot -y (left)
 
 
 def test_quat_to_mat_identity_and_known():
