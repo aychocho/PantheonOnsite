@@ -240,7 +240,7 @@ def main():
             print(f"rx {rx_count / (now - last_report):.0f}Hz tx {args.rate:.0f}Hz "
                   f"clutch={'ON' if teleop.clutch.engaged else 'off'} "
                   f"ik_err={teleop.ik_err:.4f} grip={grip_m:.3f} "
-                  f"q={[round(v, 3) for v in q]}", flush=True)
+                  f"q={[round(float(v), 3) for v in q]}", flush=True)
             rx_count = 0
             last_report = now
 
