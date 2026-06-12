@@ -60,6 +60,12 @@ def iface_ipv4(iface):
     return _iface_addr(iface, 0x8915)  # SIOCGIFADDR
 
 
+def ts():
+    """Wall-clock timestamp for log lines: HH:MM:SS.mmm"""
+    now = time.time()
+    return time.strftime("%H:%M:%S", time.localtime(now)) + f".{int(now % 1 * 1000):03d}"
+
+
 def iface_bcast(iface):
     """IPv4 broadcast address of a network interface (Linux)."""
     return _iface_addr(iface, 0x8919)  # SIOCGIFBRDADDR
@@ -115,18 +121,18 @@ def run_leader(robot, gripper, sock, target, rate):
         now = time.monotonic()
         if now - last_report >= 1.0:
             if ja is not None:
-                print(f"tx {sent / (now - last_report):.0f}Hz"
+                print(f"[{ts()}] tx {sent / (now - last_report):.0f}Hz"
                       f" joints: {[round(j, 4) for j in joints]}"
                       f" gripper: {grip} (feedback {ja.hz:.0f}Hz)", flush=True)
             else:
-                print("tx 0Hz (no arm feedback)", flush=True)
+                print(f"[{ts()}] tx 0Hz (no arm feedback)", flush=True)
             sent = 0
             last_report = now
         time.sleep(period)
 
 
 def run_follower(robot, gripper, sock):
-    rx = applied = 0
+    rx = applied = dropped = 0
     last_seq = -1
     aligned = False
     last_report = time.monotonic()
@@ -144,13 +150,14 @@ def run_follower(robot, gripper, sock):
         vals = WIRE.unpack(data)
         t, seq = vals[0], vals[1]
         joints, grip = list(vals[2:8]), vals[8]
-        if seq <= last_seq:  # reordered/stale datagram
+        if seq <= last_seq:  # reordered/stale datagram: ditch it
+            dropped += 1
             continue
         last_seq = seq
         if not aligned:
             # move_js is unsmoothed MIT pass-through: snap-to-target from a
             # distant pose is dangerous, so align with a planned move_j first.
-            print(f"Aligning to leader pose with move_j: {[round(j, 4) for j in joints]} ...", flush=True)
+            print(f"[{ts()}] Aligning to leader pose with move_j: {[round(j, 4) for j in joints]} ...", flush=True)
             robot.move_j(joints)
             time.sleep(0.5)
             deadline = time.monotonic() + 10.0
@@ -160,7 +167,7 @@ def run_follower(robot, gripper, sock):
                     break
                 time.sleep(0.1)
             aligned = True
-            print("Aligned — switching to high-follow (move_js, no smoothing).", flush=True)
+            print(f"[{ts()}] Aligned — switching to high-follow (move_js, no smoothing).", flush=True)
         else:
             robot.move_js(joints)
         if gripper and not math.isnan(grip):
@@ -170,10 +177,10 @@ def run_follower(robot, gripper, sock):
         if now - last_report >= 1.0:
             # age trends matter more than the absolute value (rig clocks differ)
             age_ms = (time.time() - t) * 1000.0
-            print(f"rx {rx / (now - last_report):.0f}Hz applied {applied / (now - last_report):.0f}Hz"
-                  f" age {age_ms:+.1f}ms joints: {[round(j, 4) for j in joints]}"
+            print(f"[{ts()}] rx {rx / (now - last_report):.0f}Hz applied {applied / (now - last_report):.0f}Hz"
+                  f" ooo-dropped {dropped} age {age_ms:+.1f}ms joints: {[round(j, 4) for j in joints]}"
                   f" gripper: {None if math.isnan(grip) else grip}", flush=True)
-            rx = applied = 0
+            rx = applied = dropped = 0
             last_report = now
 
 
