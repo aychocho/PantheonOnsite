@@ -144,7 +144,8 @@ def run_follower(robot, gripper, sock):
     rx = applied = dropped = 0
     last_seq = -1
     aligned = False
-    last_report = time.monotonic()
+    ages = []  # per-applied-sample latency (includes rig clock offset)
+    last_report = last_stats = time.monotonic()
     while True:
         data = sock.recv(2048)
         rx += 1
@@ -182,15 +183,25 @@ def run_follower(robot, gripper, sock):
         if gripper and not math.isnan(grip):
             gripper.move_gripper_m(grip)
         applied += 1
+        ages.append(time.time() - t)
         now = time.monotonic()
         if now - last_report >= 1.0:
             # age trends matter more than the absolute value (rig clocks differ)
             age_ms = (time.time() - t) * 1000.0
             print(f"[{ts()}] rx {rx / (now - last_report):.0f}Hz applied {applied / (now - last_report):.0f}Hz"
-                  f" ooo-dropped {dropped} age {age_ms:+.1f}ms joints: {[round(j, 4) for j in joints]}"
+                  f" dropped {dropped} age {age_ms:+.1f}ms joints: {[round(j, 4) for j in joints]}"
                   f" gripper: {None if math.isnan(grip) else grip}", flush=True)
             rx = applied = dropped = 0
             last_report = now
+        if now - last_stats >= 10.0 and ages:
+            s = sorted(ages)
+            n = len(s)
+            print(f"[{ts()}] latency n={n}"
+                  f" mean {sum(s) / n * 1000:+.2f}ms"
+                  f" p99 {s[min(n - 1, int(n * 0.99))] * 1000:+.2f}ms"
+                  f" p99.9 {s[min(n - 1, int(n * 0.999))] * 1000:+.2f}ms", flush=True)
+            ages.clear()
+            last_stats = now
 
 
 def main():
