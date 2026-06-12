@@ -140,3 +140,5 @@ def test_solve_step_cap(solver):
     T_goal = pin.SE3(np.eye(3), np.array([0.4, 0.3, 0.4]))  # far from HOME's EE
     q = solver.solve(T_goal, HOME.copy(), step_cap=0.02)
     assert np.max(np.abs(q - HOME)) <= 0.02 + 1e-9
+    assert np.all(q >= solver.model.lowerPositionLimit - 1e-9)
+    assert np.all(q <= solver.model.upperPositionLimit + 1e-9)

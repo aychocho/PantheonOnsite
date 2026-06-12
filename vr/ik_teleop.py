@@ -100,6 +100,8 @@ class IkSolver:
         self.model = pin.buildReducedModel(full, lock, pin.neutral(full))
         self.data = self.model.createData()
         self.fid = self.model.getFrameId(ee_frame)
+        if self.fid >= self.model.nframes:
+            raise ValueError(f"Frame {ee_frame!r} not found in {urdf_path}")
 
     def fk(self, q):
         """End-effector pose (SE3 copy) for configuration q."""
@@ -123,5 +125,5 @@ class IkSolver:
             dq = J.T @ np.linalg.solve(J @ J.T + damping * np.eye(6), err)
             q = np.clip(q + dq, lo, hi)
         if step_cap is not None:
-            q = q0 + np.clip(q - q0, -step_cap, step_cap)
+            q = np.clip(q0 + np.clip(q - q0, -step_cap, step_cap), lo, hi)
         return q
