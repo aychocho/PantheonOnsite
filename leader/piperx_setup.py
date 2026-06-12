@@ -12,8 +12,9 @@ within reach; this mode has no trajectory planning.
     python piperx_setup.py --follower                          # listens on :8080 (local or cross-rig)
     python piperx_setup.py --home --can can0                   # return arm to zero pose
 
---leader polls the arm's joint feedback at --rate (default 100Hz) and publishes
-it; it does not change the arm's control mode. Use the teach button to put the
+--leader polls the arm's joint feedback at --rate (default 200Hz, matching the
+arm's CAN feedback rate) and publishes it; it does not change the arm's control
+mode. Use the teach button to put the
 arm in drag mode for hand-guiding.
 CAN must be up first: sudo ip link set can0 up type can bitrate 1000000
 """
@@ -104,11 +105,12 @@ def enter_can_ctrl(robot):
 
 def run_leader(robot, gripper, sock, target, rate):
     # Status is printed once per second, NOT per sample: blocking on a slow
-    # terminal/ssh stdout at 100Hz stalls the control loop and builds lag.
+    # terminal/ssh stdout at the publish rate stalls the control loop and builds lag.
     period = 1.0 / rate
     seq = sent = 0
     joints = grip = None
     last_report = time.monotonic()
+    next_t = time.monotonic() + period
     while True:
         ja = robot.get_joint_angles()
         if ja is not None:
@@ -128,7 +130,14 @@ def run_leader(robot, gripper, sock, target, rate):
                 print(f"[{ts()}] tx 0Hz (no arm feedback)", flush=True)
             sent = 0
             last_report = now
-        time.sleep(period)
+        # Absolute deadlines: loop-body time doesn't erode the rate (a plain
+        # sleep(period) lands ~1-3% under target and drifts).
+        next_t += period
+        sleep = next_t - time.monotonic()
+        if sleep > 0:
+            time.sleep(sleep)
+        else:
+            next_t = time.monotonic()  # fell behind: skip ahead, don't burst to catch up
 
 
 def run_follower(robot, gripper, sock):
@@ -196,7 +205,8 @@ def main():
                     help="leader: broadcast on this ethernet interface's subnet (e.g. enp6s0)")
     ap.add_argument("--port", type=int, default=8080, help="port (default: 8080)")
     ap.add_argument("--can", default="can0", help="CAN channel (default: can0)")
-    ap.add_argument("--rate", type=float, default=100.0, help="leader publish rate in Hz (default: 100)")
+    ap.add_argument("--rate", type=float, default=200.0,
+                    help="leader publish rate in Hz (default: 200, the arm's feedback rate)")
     args = ap.parse_args()
 
     # Resolve/validate networking before touching the arm.
