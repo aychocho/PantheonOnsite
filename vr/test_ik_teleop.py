@@ -6,8 +6,9 @@ from pathlib import Path
 
 import numpy as np
 import pinocchio as pin
+import pytest
 
-from ik_teleop import AXIS_MAP, WIRE, Clutch, quat_to_mat
+from ik_teleop import AXIS_MAP, DEFAULT_URDF, HOME, WIRE, Clutch, IkSolver, quat_to_mat
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -93,3 +94,49 @@ def test_clutch_regrip_does_not_jump():
     a2 = _se3(p=(0.3, 0.0, 0.3))
     T = c.update(1.0, np.array([5.0, 5.0, 5.0]), np.eye(3), a2)
     assert np.allclose(T.translation, a2.translation)
+
+
+@pytest.fixture(scope="module")
+def solver():
+    return IkSolver(DEFAULT_URDF)
+
+
+def test_model_reduced_to_six_joints(solver):
+    assert solver.model.nq == 6
+    assert solver.model.nv == 6
+
+
+def test_home_pose_is_sane(solver):
+    T = solver.fk(HOME)
+    # Ready pose must put the gripper in front of the base, above the table.
+    assert T.translation[0] > 0.1, f"home EE x={T.translation[0]:.3f}, want forward"
+    assert T.translation[2] > 0.05, f"home EE z={T.translation[2]:.3f}, want above base"
+
+
+def test_fk_ik_roundtrip(solver):
+    rng = np.random.default_rng(42)
+    lo, hi = solver.model.lowerPositionLimit, solver.model.upperPositionLimit
+    margin = 0.1 * (hi - lo)
+    for _ in range(20):
+        q_true = rng.uniform(lo + margin, hi - margin)
+        T_goal = solver.fk(q_true)
+        q0 = np.clip(q_true + rng.uniform(-0.1, 0.1, 6), lo, hi)  # warm start nearby
+        q_sol = solver.solve(T_goal, q0, iters=100)
+        T_sol = solver.fk(q_sol)
+        assert np.linalg.norm(T_sol.translation - T_goal.translation) < 1e-3
+        rot_err = pin.log3(T_sol.rotation.T @ T_goal.rotation)
+        assert np.linalg.norm(rot_err) < 0.01
+
+
+def test_solve_respects_joint_limits(solver):
+    # An unreachable target (1m up) must still yield an in-limits solution.
+    T_goal = pin.SE3(np.eye(3), np.array([0.0, 0.0, 1.5]))
+    q = solver.solve(T_goal, HOME.copy(), iters=100)
+    assert np.all(q >= solver.model.lowerPositionLimit - 1e-9)
+    assert np.all(q <= solver.model.upperPositionLimit + 1e-9)
+
+
+def test_solve_step_cap(solver):
+    T_goal = pin.SE3(np.eye(3), np.array([0.4, 0.3, 0.4]))  # far from HOME's EE
+    q = solver.solve(T_goal, HOME.copy(), step_cap=0.02)
+    assert np.max(np.abs(q - HOME)) <= 0.02 + 1e-9

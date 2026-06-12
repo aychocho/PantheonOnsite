@@ -89,3 +89,39 @@ class Clutch:
         dp = self.scale * (AXIS_MAP @ (p_xr - self._p0))
         dR = AXIS_MAP @ (R_xr @ self._R0.T) @ AXIS_MAP.T
         return pin.SE3(dR @ self._T0.rotation, self._T0.translation + dp)
+
+
+class IkSolver:
+    """Damped-least-squares IK on the PiPER URDF (gripper fingers locked)."""
+
+    def __init__(self, urdf_path=DEFAULT_URDF, ee_frame="gripper_base"):
+        full = pin.buildModelFromUrdf(str(urdf_path))
+        lock = [full.getJointId(n) for n in ("joint7", "joint8")]
+        self.model = pin.buildReducedModel(full, lock, pin.neutral(full))
+        self.data = self.model.createData()
+        self.fid = self.model.getFrameId(ee_frame)
+
+    def fk(self, q):
+        """End-effector pose (SE3 copy) for configuration q."""
+        pin.forwardKinematics(self.model, self.data, q)
+        pin.updateFramePlacements(self.model, self.data)
+        T = self.data.oMf[self.fid]
+        return pin.SE3(T.rotation.copy(), T.translation.copy())
+
+    def solve(self, T_target, q0, iters=10, damping=1e-3, tol=1e-4, step_cap=None):
+        """Iterate DLS from warm start q0. Always returns an in-limits q;
+        if step_cap is set, |q - q0| <= step_cap per joint (bounds EE speed
+        even if the target jumps)."""
+        lo, hi = self.model.lowerPositionLimit, self.model.upperPositionLimit
+        q = q0.copy()
+        for _ in range(iters):
+            err = pin.log(self.fk(q).actInv(T_target)).vector
+            if np.linalg.norm(err) < tol:
+                break
+            J = pin.computeFrameJacobian(self.model, self.data, q, self.fid,
+                                         pin.ReferenceFrame.LOCAL)
+            dq = J.T @ np.linalg.solve(J @ J.T + damping * np.eye(6), err)
+            q = np.clip(q + dq, lo, hi)
+        if step_cap is not None:
+            q = q0 + np.clip(q - q0, -step_cap, step_cap)
+        return q
