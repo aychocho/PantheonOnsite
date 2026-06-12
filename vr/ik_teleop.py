@@ -59,3 +59,33 @@ def quat_to_mat(x, y, z, w):
         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
     ])
+
+
+class Clutch:
+    """Delta clutch: while grip is held, the EE target follows the
+    controller's pose *delta* from the grip-press moment, applied to the EE
+    pose latched at that moment (anchor). Hysteresis avoids chatter."""
+
+    ENGAGE, RELEASE = 0.8, 0.5
+
+    def __init__(self, scale=1.0):
+        self.scale = scale
+        self.engaged = False
+        self._p0 = self._R0 = self._T0 = None
+
+    def update(self, grip, p_xr, R_xr, anchor_T):
+        """One controller sample. anchor_T: current EE pose (latched on
+        engage). Returns the target SE3 while engaged, else None."""
+        if not self.engaged:
+            if grip > self.ENGAGE:
+                self.engaged = True
+                self._p0, self._R0 = p_xr.copy(), R_xr.copy()
+                self._T0 = pin.SE3(anchor_T.rotation.copy(), anchor_T.translation.copy())
+            else:
+                return None
+        elif grip < self.RELEASE:
+            self.engaged = False
+            return None
+        dp = self.scale * (AXIS_MAP @ (p_xr - self._p0))
+        dR = AXIS_MAP @ (R_xr @ self._R0.T) @ AXIS_MAP.T
+        return pin.SE3(dR @ self._T0.rotation, self._T0.translation + dp)

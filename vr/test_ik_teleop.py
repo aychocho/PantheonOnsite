@@ -42,3 +42,58 @@ def test_quat_to_mat_identity_and_known():
     # Unnormalized input is normalized internally
     R2 = quat_to_mat(0, 0, 2 * s, 2 * math.cos(math.pi / 4))
     assert np.allclose(R, R2)
+
+
+import pinocchio as pin
+
+from ik_teleop import Clutch
+
+
+def _se3(R=None, p=(0, 0, 0)):
+    return pin.SE3(np.eye(3) if R is None else R, np.array(p, dtype=float))
+
+
+def test_clutch_hysteresis():
+    c = Clutch()
+    anchor = _se3(p=(0.3, 0.0, 0.2))
+    p, R = np.zeros(3), np.eye(3)
+    assert c.update(0.0, p, R, anchor) is None and not c.engaged
+    assert c.update(0.7, p, R, anchor) is None and not c.engaged   # below engage
+    assert c.update(0.9, p, R, anchor) is not None and c.engaged   # engages
+    assert c.update(0.6, p, R, anchor) is not None and c.engaged   # held (above release)
+    assert c.update(0.4, p, R, anchor) is None and not c.engaged   # releases
+
+
+def test_clutch_position_delta_axis_mapped():
+    c = Clutch(scale=2.0)
+    anchor = _se3(p=(0.3, 0.0, 0.2))
+    c.update(1.0, np.zeros(3), np.eye(3), anchor)
+    # Move controller 0.1m along XR -z (away from user) => robot +x, scaled 2x
+    T = c.update(1.0, np.array([0.0, 0.0, -0.1]), np.eye(3), anchor)
+    assert np.allclose(T.translation, [0.5, 0.0, 0.2])
+    assert np.allclose(T.rotation, np.eye(3))
+
+
+def test_clutch_orientation_delta():
+    c = Clutch()
+    anchor = _se3(p=(0.3, 0.0, 0.2))
+    c.update(1.0, np.zeros(3), np.eye(3), anchor)
+    # Rotate controller 90deg about XR +y (up) => robot +z (up)
+    s, co = math.sin(math.pi / 4), math.cos(math.pi / 4)
+    T = c.update(1.0, np.zeros(3), quat_to_mat(0, s, 0, co), anchor)
+    expected = quat_to_mat(0, 0, s, co)  # 90deg about robot z
+    assert np.allclose(T.rotation, expected, atol=1e-12)
+    assert np.allclose(T.translation, anchor.translation)
+
+
+def test_clutch_regrip_does_not_jump():
+    c = Clutch()
+    a1 = _se3(p=(0.3, 0.0, 0.2))
+    c.update(1.0, np.zeros(3), np.eye(3), a1)
+    c.update(1.0, np.array([0.0, 0.1, 0.0]), np.eye(3), a1)  # moved up 0.1
+    c.update(0.0, np.zeros(3), np.eye(3), a1)                 # release
+    # Re-grip with the controller somewhere totally different: first update
+    # latches the NEW anchor and returns it unchanged - no jump.
+    a2 = _se3(p=(0.3, 0.0, 0.3))
+    T = c.update(1.0, np.array([5.0, 5.0, 5.0]), np.eye(3), a2)
+    assert np.allclose(T.translation, a2.translation)
