@@ -44,6 +44,9 @@ def test_quat_to_mat_identity_and_known():
     # Unnormalized input is normalized internally
     R2 = quat_to_mat(0, 0, 2 * s, 2 * math.cos(math.pi / 4))
     assert np.allclose(R, R2)
+    # Zero quat (Quest pre-tracking) raises ValueError, not ZeroDivisionError
+    with pytest.raises(ValueError):
+        quat_to_mat(0, 0, 0, 0)
 
 
 def _se3(R=None, p=(0, 0, 0)):

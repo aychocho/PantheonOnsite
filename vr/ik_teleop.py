@@ -53,6 +53,8 @@ HOME = np.array([0.0, 0.9, -0.8, 0.0, 0.6, 0.0])
 def quat_to_mat(x, y, z, w):
     """Rotation matrix from an xyzw quaternion (normalizes input)."""
     n = math.sqrt(x * x + y * y + z * z + w * w)
+    if n < 1e-9:  # Quest emits zero quats before tracking locks on
+        raise ValueError(f"zero quaternion: ({x}, {y}, {z}, {w})")
     x, y, z, w = x / n, y / n, z / n, w / n
     return np.array([
         [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
@@ -148,7 +150,7 @@ class Teleop:
     def tick(self, msg):
         """Consume one Quest message (or None). Returns (q, gripper_width)."""
         c = None
-        if msg:
+        if msg is not None:
             c = next((c for c in msg.get("controllers", [])
                       if c.get("hand") == self.hand), None)
         if c is not None:
