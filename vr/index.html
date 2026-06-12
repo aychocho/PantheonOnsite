@@ -35,22 +35,25 @@ function buttonMask(gp) {
 
 document.getElementById("enter").onclick = async () => {
   if (!navigator.xr) { status.textContent = "WebXR not available"; return; }
-  // immersive-ar = passthrough on Quest; fall back to VR if unavailable.
-  let session;
-  try {
-    session = await navigator.xr.requestSession("immersive-ar", {
-      optionalFeatures: ["local-floor"],
-    });
-  } catch {
-    session = await navigator.xr.requestSession("immersive-vr", {
-      optionalFeatures: ["local-floor"],
-    });
-  }
+  // immersive-ar = passthrough on Quest; fall back to VR if unsupported.
+  const arOk = await navigator.xr.isSessionSupported("immersive-ar");
+  const mode = arOk ? "immersive-ar" : "immersive-vr";
+  const session = await navigator.xr.requestSession(mode, {
+    optionalFeatures: ["local-floor"],
+  });
 
   // WebXR requires a base layer even though we render nothing.
   const canvas = document.createElement("canvas");
-  const gl = canvas.getContext("webgl", { xrCompatible: true });
-  await session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+  const gl = canvas.getContext("webgl", { xrCompatible: true, alpha: true });
+  await session.updateRenderState({
+    baseLayer: new XRWebGLLayer(session, gl, { alpha: true }),
+  });
+
+  // Report what actually started, both on-page and in the server log.
+  const info = `mode=${mode} blend=${session.environmentBlendMode}`;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ info }));
+  }
 
   let refSpace;
   try { refSpace = await session.requestReferenceSpace("local-floor"); }
@@ -88,8 +91,8 @@ document.getElementById("enter").onclick = async () => {
     }
   });
 
-  session.onend = () => { status.textContent = "VR session ended."; };
-  status.textContent = "Streaming...";
+  session.onend = () => { status.textContent = `Session ended (${info})`; };
+  status.textContent = `Streaming... ${info}`;
 };
 </script>
 </body>

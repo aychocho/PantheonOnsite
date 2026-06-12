@@ -71,6 +71,9 @@ class Collector:
         print(f"Logging to {path}" + (f", rebroadcasting UDP to {udp_addr[0]}:{udp_addr[1]}" if udp_addr else ""))
 
     def handle(self, msg: dict):
+        if "info" in msg:
+            print(f"Quest session: {msg['info']}", flush=True)
+            return
         t_recv = time.time()
         for c in msg.get("controllers", []):
             # xr-standard gamepad bitmask: 0 trigger, 1 grip, 3 thumbstick click,
@@ -124,7 +127,9 @@ async def ws_handler(request):
 
 
 async def index(request):
-    return web.FileResponse(HERE / "index.html")
+    # no-store: Quest browser otherwise caches the page and keeps running stale JS
+    return web.FileResponse(HERE / "index.html",
+                            headers={"Cache-Control": "no-store"})
 
 
 def main():
