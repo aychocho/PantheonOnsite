@@ -1,5 +1,9 @@
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["pytest", "pin", "numpy"]
+# ///
 """Unit tests for ik_teleop. Run from vr/:
-    uv run --with pytest --with pin --with numpy python -m pytest test_ik_teleop.py -v
+    uv run test_ik_teleop.py
 """
 import math
 from pathlib import Path
@@ -99,6 +103,23 @@ def test_clutch_regrip_does_not_jump():
     assert np.allclose(T.translation, a2.translation)
 
 
+def test_clutch_slip_relatches():
+    c = Clutch()
+    a = _se3(p=(0.3, 0.0, 0.2))
+    c.update(1.0, np.zeros(3), np.eye(3), a)
+    hand = np.array([0.0, 2.0, 0.0])  # dragged 2m up: far out of reach
+    c.update(1.0, hand, np.eye(3), a)
+    boundary = _se3(p=(0.3, 0.0, 0.6))
+    c.slip(hand, np.eye(3), boundary)
+    assert c.engaged
+    # Same hand pose now maps to the slipped anchor, not the original one.
+    T = c.update(1.0, hand, np.eye(3), a)
+    assert np.allclose(T.translation, boundary.translation)
+    # Further hand motion is a delta from the slipped anchor.
+    T = c.update(1.0, hand + [0.0, -0.1, 0.0], np.eye(3), a)
+    assert np.allclose(T.translation, boundary.translation + [0, 0, -0.1])
+
+
 @pytest.fixture(scope="module")
 def solver():
     return IkSolver(DEFAULT_URDF)
@@ -137,6 +158,19 @@ def test_solve_respects_joint_limits(solver):
     q = solver.solve(T_goal, HOME.copy(), iters=100)
     assert np.all(q >= solver.model.lowerPositionLimit - 1e-9)
     assert np.all(q <= solver.model.upperPositionLimit + 1e-9)
+
+
+def test_solve_favors_orientation(solver):
+    # Unreachable position with a holdable orientation: rot_weight > 1 must
+    # make the solver give up position, keeping orientation near-exact.
+    T0 = solver.fk(HOME)
+    T_goal = pin.SE3(T0.rotation.copy(),
+                     T0.translation + np.array([0.45, 0.0, 0.0]))
+    q = solver.solve(T_goal, HOME.copy(), iters=200)
+    T = solver.fk(q)
+    ori_err = np.linalg.norm(pin.log3(T.rotation.T @ T_goal.rotation))
+    assert ori_err < 0.01, f"orientation sacrificed: {np.rad2deg(ori_err):.1f}deg"
+    assert np.linalg.norm(T.translation - T_goal.translation) > 0.01  # pos gave way
 
 
 def test_solve_step_cap(solver):
@@ -190,6 +224,47 @@ def test_tick_freezes_on_release(teleop):
     assert np.allclose(q_held, q_after)                      # frozen
 
 
+def test_tick_slips_at_workspace_boundary(teleop):
+    teleop.tick(_quest_msg(grip=1.0))
+    z_home = teleop.solver.fk(teleop.q).translation[2]
+    # Ramp the hand 1.5m up at 1cm/tick: far past the arm's reach.
+    for i in range(150):
+        teleop.tick(_quest_msg(grip=1.0, pos=(0, 0.01 * (i + 1), 0)))
+    assert teleop.slips > 0
+    assert teleop.ik_err < 0.1                       # bounded, not ~1.5
+    z_top = teleop.solver.fk(teleop.q).translation[2]
+    assert z_top > z_home + 0.05                     # rode up to the boundary
+    # Pull back 0.3m (ramped, like a real hand): the EE must follow promptly
+    # instead of replaying ~1m of unreachable overshoot first.
+    for i in range(30):
+        teleop.tick(_quest_msg(grip=1.0, pos=(0, 1.5 - 0.01 * (i + 1), 0)))
+    for _ in range(40):  # settle: input EMA + step-capped IK both add lag
+        q, _ = teleop.tick(_quest_msg(grip=1.0, pos=(0, 1.2, 0)))
+    assert z_top - teleop.solver.fk(q).translation[2] > 0.1
+
+
+def test_ik_err_resets_when_not_clutched(teleop):
+    teleop.tick(_quest_msg(grip=1.0))
+    for i in range(50):
+        teleop.tick(_quest_msg(grip=1.0, pos=(0, 0.01 * (i + 1), 0)))
+    teleop.tick(_quest_msg(grip=0.0))
+    assert teleop.ik_err == 0.0
+
+
+def test_smoothing_attenuates_tracking_jitter(solver):
+    # Quest pose noise dithered the joints at full rate into the follower's
+    # unsmoothed move_js (mechanical buzz while holding the hand still).
+    def joint_p2p(smooth):
+        t = Teleop(solver, smooth=smooth)
+        t.tick(_quest_msg(grip=1.0))
+        qs = []
+        for i in range(100):  # hand "still": 2mm alternating tracking noise
+            q, _ = t.tick(_quest_msg(grip=1.0, pos=(0, 0.002 * (-1) ** i, 0)))
+            qs.append(q.copy())
+        return np.ptp(np.array(qs[20:]), axis=0).max()
+    assert joint_p2p(0.2) < 0.4 * joint_p2p(1.0)
+
+
 def test_trigger_maps_to_gripper_width(teleop):
     _, w_open = teleop.tick(_quest_msg(trigger=0.0))
     _, w_closed = teleop.tick(_quest_msg(trigger=1.0))
@@ -203,3 +278,8 @@ def test_gripper_nan_until_first_sample(solver):
     t = Teleop(solver)
     _, w = t.tick(None)
     assert math.isnan(w)
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(pytest.main([__file__, "-v"]))

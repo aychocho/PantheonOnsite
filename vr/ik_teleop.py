@@ -12,7 +12,10 @@ as 40-byte WIRE datagrams to piperx_setup.py --follower (it impersonates a
 
 Hold the GRIP button to clutch in: the end-effector tracks your hand's
 position+orientation deltas (latched at grip press, so re-gripping never
-jumps). The analog TRIGGER sets gripper width (pulled = closed).
+jumps). The analog TRIGGER sets gripper width (pulled = closed). If you drag
+the target past the reachable workspace (joint limits), the clutch slips:
+the target snaps to the closest reachable pose, so the EE rides the boundary
+and reverses the moment your hand does.
 
 Runs on the same machine as quest_server.py (its default --udp 127.0.0.1:5557
 lands here directly):
@@ -83,8 +86,7 @@ class Clutch:
         if not self.engaged:
             if grip > self.ENGAGE:
                 self.engaged = True
-                self._p0, self._R0 = p_xr.copy(), R_xr.copy()
-                self._T0 = pin.SE3(anchor_T.rotation.copy(), anchor_T.translation.copy())
+                self.slip(p_xr, R_xr, anchor_T)
             else:
                 return None
         elif grip < self.RELEASE:
@@ -94,11 +96,25 @@ class Clutch:
         dR = AXIS_MAP @ (R_xr @ self._R0.T) @ AXIS_MAP.T
         return pin.SE3(dR @ self._T0.rotation, self._T0.translation + dp)
 
+    def slip(self, p_xr, R_xr, T0_new):
+        """Re-latch mid-grip: future deltas apply from T0_new, referenced to
+        the current controller pose. Lets the target ride the workspace
+        boundary instead of diverging past it."""
+        self._p0, self._R0 = p_xr.copy(), R_xr.copy()
+        self._T0 = pin.SE3(T0_new.rotation.copy(), T0_new.translation.copy())
+
 
 class IkSolver:
-    """Damped-least-squares IK on the PiPER URDF (gripper fingers locked)."""
+    """Damped-least-squares IK on the PiPER URDF (gripper fingers locked).
 
-    def __init__(self, urdf_path=DEFAULT_URDF, ee_frame="gripper_base"):
+    rot_weight sets the orientation-vs-position balance when a target is not
+    exactly reachable: 1.0 treats 1 rad like 1 m; higher trades position away
+    to hold orientation. The weight only bites because solve() masks limit-
+    pinned joints and caps per-iteration steps - without those, DLS stalls in
+    a local minimum at the limits and the weight has no effect."""
+
+    def __init__(self, urdf_path=DEFAULT_URDF, ee_frame="gripper_base",
+                 rot_weight=2.0):
         full = pin.buildModelFromUrdf(str(urdf_path))
         lock = [full.getJointId(n) for n in ("joint7", "joint8")]
         self.model = pin.buildReducedModel(full, lock, pin.neutral(full))
@@ -106,6 +122,11 @@ class IkSolver:
         self.fid = self.model.getFrameId(ee_frame)
         if self.fid >= self.model.nframes:
             raise ValueError(f"Frame {ee_frame!r} not found in {urdf_path}")
+        self.W = np.array([1.0, 1.0, 1.0, rot_weight, rot_weight, rot_weight])
+
+    def err(self, T_from, T_to):
+        """Unweighted error norm between two EE poses (slip/status metric)."""
+        return float(np.linalg.norm(pin.log(T_from.actInv(T_to)).vector))
 
     def fk(self, q):
         """End-effector pose (SE3 copy) for configuration q."""
@@ -121,12 +142,27 @@ class IkSolver:
         lo, hi = self.model.lowerPositionLimit, self.model.upperPositionLimit
         q = q0.copy()
         for _ in range(iters):
-            err = pin.log(self.fk(q).actInv(T_target)).vector
+            err = self.W * pin.log(self.fk(q).actInv(T_target)).vector
             if np.linalg.norm(err) < tol:
                 break
-            J = pin.computeFrameJacobian(self.model, self.data, q, self.fid,
-                                         pin.ReferenceFrame.LOCAL)
-            dq = J.T @ np.linalg.solve(J @ J.T + damping * np.eye(6), err)
+            J = self.W[:, None] * pin.computeFrameJacobian(
+                self.model, self.data, q, self.fid, pin.ReferenceFrame.LOCAL)
+            # Active-set: a joint pinned at a limit and pushing further out
+            # contributes nothing; zero its column and re-solve so the step
+            # re-routes through the free joints (otherwise DLS stalls there).
+            for _ in range(3):
+                dq = J.T @ np.linalg.solve(J @ J.T + damping * np.eye(6), err)
+                pinned = (((q <= lo + 1e-9) & (dq < 0)) |
+                          ((q >= hi - 1e-9) & (dq > 0)))
+                if not pinned.any():
+                    break
+                J = J.copy()
+                J[:, pinned] = 0.0
+            # Keep each step small enough that the linearization holds; a
+            # big jump lands in a worse basin the weights can't escape.
+            big = np.abs(dq).max()
+            if big > 0.2:
+                dq *= 0.2 / big
             q = np.clip(q + dq, lo, hi)
         if step_cap is not None:
             q = np.clip(q0 + np.clip(q - q0, -step_cap, step_cap), lo, hi)
@@ -138,7 +174,7 @@ class Teleop:
     (q, gripper_width) to put on the wire."""
 
     def __init__(self, solver, hand="right", scale=1.0, max_grip=0.07,
-                 step_cap=0.03):
+                 step_cap=0.03, slip_tol=0.02, smooth=0.2):
         self.solver = solver
         self.hand = hand
         self.clutch = Clutch(scale)
@@ -146,8 +182,15 @@ class Teleop:
         self.gripper = math.nan  # NaN on the wire = "no gripper command"
         self.max_grip = max_grip
         self.step_cap = step_cap
+        self.slip_tol = slip_tol  # unreachable residual (SE3 log norm) before the clutch slips
+        # EMA weight per controller sample (1.0 = no smoothing). Quest pose
+        # noise otherwise dithers the wrist joints at full rate, which the
+        # follower's unsmoothed move_js turns into mechanical buzz.
+        self.smooth = smooth
+        self._p_f = self._R_f = None
         self.T_target = None
         self.ik_err = 0.0
+        self.slips = 0
 
     def tick(self, msg):
         """Consume one Quest message (or None). Returns (q, gripper_width)."""
@@ -155,17 +198,42 @@ class Teleop:
         if msg is not None:
             c = next((c for c in msg.get("controllers", [])
                       if c.get("hand") == self.hand), None)
+        p = R = None
         if c is not None:
             p = np.asarray(c["pos"], dtype=float)
             R = quat_to_mat(*c["quat"])
+            if self.smooth < 1.0:
+                if self._p_f is None:
+                    self._p_f, self._R_f = p, R
+                else:
+                    a = self.smooth
+                    self._p_f = self._p_f + a * (p - self._p_f)
+                    self._R_f = self._R_f @ pin.exp3(a * pin.log3(self._R_f.T @ R))
+                p, R = self._p_f, self._R_f
             anchor = self.solver.fk(self.q)
             self.T_target = self.clutch.update(c.get("grip", 0.0), p, R, anchor)
             self.gripper = (1.0 - float(c.get("trigger", 0.0))) * self.max_grip
         if self.clutch.engaged and self.T_target is not None:
-            self.q = self.solver.solve(self.T_target, self.q,
-                                       step_cap=self.step_cap)
-            err = pin.log(self.solver.fk(self.q).actInv(self.T_target)).vector
-            self.ik_err = float(np.linalg.norm(err))
+            # Probe: converge fully (no step cap) to find the closest
+            # reachable pose to the target.
+            q_star = self.solver.solve(self.T_target, self.q, iters=50)
+            T_star = self.solver.fk(q_star)
+            resid = self.solver.err(T_star, self.T_target)
+            if resid > self.slip_tol and p is not None:
+                # Target unreachable (joint limits / workspace edge): slip
+                # the clutch so the target becomes the closest reachable
+                # pose. Reversing the hand then moves the EE immediately
+                # instead of replaying the unreachable overshoot.
+                self.clutch.slip(p, R, T_star)
+                self.T_target = T_star
+                self.slips += 1
+            # Rate-limited step toward q_star (q stays in limits: both
+            # endpoints are, and limits are a per-joint box).
+            self.q = self.q + np.clip(q_star - self.q,
+                                      -self.step_cap, self.step_cap)
+            self.ik_err = self.solver.err(self.solver.fk(self.q), self.T_target)
+        else:
+            self.ik_err = 0.0
         return self.q, self.gripper
 
 
@@ -188,13 +256,21 @@ def main():
                     help="hand-to-EE motion scale (default: 1.0)")
     ap.add_argument("--max-grip", type=float, default=0.07,
                     help="gripper width at trigger=0, meters (default: 0.07)")
+    ap.add_argument("--smooth", type=float, default=0.2,
+                    help="controller pose EMA weight per sample, 1.0 = off "
+                         "(default: 0.2, ~3Hz cutoff at Quest rates)")
+    ap.add_argument("--rot-weight", type=float, default=2.0,
+                    help="orientation emphasis when a target is unreachable: "
+                         "1.0 = balanced, higher holds orientation harder "
+                         "(default: 2.0)")
     ap.add_argument("--urdf", type=Path, default=DEFAULT_URDF)
     ap.add_argument("--dry-run", action="store_true",
                     help="suppress UDP sends (status line still prints)")
     args = ap.parse_args()
 
-    teleop = Teleop(IkSolver(args.urdf), hand=args.hand, scale=args.scale,
-                    max_grip=args.max_grip)
+    teleop = Teleop(IkSolver(args.urdf, rot_weight=args.rot_weight),
+                    hand=args.hand, scale=args.scale,
+                    max_grip=args.max_grip, smooth=args.smooth)
 
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rx.bind(parse_hostport(args.listen, default_host="0.0.0.0"))
@@ -209,7 +285,7 @@ def main():
           flush=True)
 
     period = 1.0 / args.rate
-    seq = rx_count = 0
+    seq = rx_count = slips_seen = 0
     last_report = time.monotonic()
     next_t = time.monotonic()
     while True:
@@ -248,9 +324,11 @@ def main():
                   f"ik_err={teleop.ik_err:.4f} "
                   f"grip={None if math.isnan(grip_m) else round(grip_m, 3)} "
                   f"q={[round(float(v), 3) for v in q]}", flush=True)
-            if teleop.clutch.engaged and teleop.ik_err > 0.01:
-                print("WARN: IK not converged - target at/near workspace "
-                      "boundary? Release grip and re-engage closer.", flush=True)
+            if teleop.slips > slips_seen:
+                print(f"WARN: at workspace/joint-limit boundary - clutch "
+                      f"slipped {teleop.slips - slips_seen}x; EE rides the "
+                      "boundary and follows as soon as you pull back.", flush=True)
+            slips_seen = teleop.slips
             rx_count = 0
             last_report = now
 
