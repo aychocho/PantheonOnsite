@@ -10,3 +10,6 @@
 [submodule "follower/pyAgxArm"]
 	path = follower/pyAgxArm
 	url = https://github.com/agilexrobotics/pyAgxArm.git
+[submodule "piper_ros"]
+	path = piper_ros
+	url = https://github.com/agilexrobotics/piper_ros.git
